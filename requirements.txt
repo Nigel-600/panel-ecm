@@ -1,0 +1,14 @@
+duckdb>=1.2.0
+joblib>=1.4.0
+lightgbm>=4.5.0
+matplotlib>=3.9.0
+numpy>=2.0.2
+optuna>=4.0.0
+optuna-dashboard>=0.16.0
+pandas>=2.2.0
+polars>=1.20.0
+scikit-base>=0.10.0
+scikit-learn>=1.5.0
+scipy>=1.13.0
+tsfile>=2.0.0
+pyarrow==25.0.0

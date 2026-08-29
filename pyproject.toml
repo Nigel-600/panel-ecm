@@ -1,0 +1,37 @@
+[project]
+name = "panel-ecm"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12.3"
+dependencies = [
+    "duckdb>=1.2.0",
+    "joblib>=1.4.0",
+    "kaggle>=2.2.4",
+    "kagglehub>=1.0.2",
+    "lightgbm>=4.5.0",
+    "matplotlib>=3.9.0",
+    "mkinit>=1.2.0",
+    "numpy>=2.0.2",
+    "optuna>=4.0.0",
+    "optuna-dashboard>=0.16.0",
+    "pandas>=2.2.0",
+    "polars>=1.20.0",
+    "pyarrow==25.0.0",
+    "scikit-base>=0.10.0",
+    "scikit-learn>=1.5.0",
+    "scipy>=1.13.0",
+    "tsfile>=2.0.0",
+]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[dependency-groups]
+dev = [
+    "ipykernel>=7.3.0",
+]
+
+[tool.setuptools]
+packages = ["panelmodels"]
