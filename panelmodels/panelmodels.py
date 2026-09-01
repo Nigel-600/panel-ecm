@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 import scipy.linalg as la
+import statsmodels.stats.api as sms
 
 import duckdb
 import polars as pl
@@ -48,14 +49,12 @@ class VariableCoefficientModel():
                 panel_df, self.index_by, None, response["y"][0], lags, drop_nans=True
             )
             for i in self.individual_ids:
-                self.regressors_with_lags[f"exog_{i}"] = self.regressors_with_lags[f"exog_{i}"] + [f"Weekly_Sales_L{lag}" for lag in range(1, lags + 1)]
+                self.regressors_with_lags[f"exog_{i}"] = self.regressors_with_lags[f"exog_{i}"] + [f"{response["y"][0]}_L{lag}" for lag in range(1, lags + 1)]
         else:
             self.panel_df_with_lag = panel_df
         self.T = self.panel_df_with_lag[self.index_by].value_counts().iloc[0]
         self.N = len(self.individual_ids)
-        self.k = len(regressors["exog_1"])
-        if intercept:
-            self.k += 1
+        self.k = len(self.regressors_with_lags["exog_1"]) + (1 if intercept else 0)  # count AFTER lags appended
         self._individual_ols(
             regressors=self.regressors_with_lags,
             response=response,
@@ -207,19 +206,27 @@ class VariableCoefficientModel():
             raise ValueError("Zero noise variance detected.")
         sigma_diag_mat = np.diag(1/self.sigma2_arr**0.5)
         mean_regressors = []
-        means_per_unit = self.panel_df_with_lag.groupby(self.index_by)[list(set(val for sublist in self.regressors_with_lags.values() for val in sublist))].mean()
-        ybar_vec = self.panel_df_with_lag.groupby(self.index_by)[self.response["y"][0]].mean()
+        grouped = self.panel_df_with_lag.groupby(self.index_by)
+        ybar_vec = grouped[self.response["y"][0]].mean().loc[self.individual_ids].to_numpy()
         
         for i in self.individual_ids:
-            mean_regressors.append(means_per_unit[self.regressors_with_lags[f"exog_{i}"]].iloc[0])
+            entity_means = grouped.get_group(i)[self.regressors_with_lags[f"exog_{i}"]].mean()
+            mean_regressors.append(entity_means.to_numpy())
             
         mean_regressors = np.stack(mean_regressors)
         if self.intercept:
             mean_regressors = np.hstack((np.ones((self.N, 1)), mean_regressors))
-            
-        bp_resids = sigma_diag_mat @ ybar_vec - sigma_diag_mat @ mean_regressors @ self.beta_mat.mean(axis = 0)
         
-        return bp_resids
+        bp_resids = sigma_diag_mat @ (ybar_vec - mean_regressors @ self.beta_mat.mean(axis = 0))
+        
+        lm_stat, p_value, f_stat, f_p_value = sms.het_breuschpagan(bp_resids, mean_regressors)
+        return {
+            "lm_statistic": lm_stat,
+            "p_value": p_value,
+            "f_statistic": f_stat,
+            "f_p_value": f_p_value,
+            "heteroscedastic": p_value < 0.05
+        }
     
     def swamy_pvalue(self):
         XtX_sigma2_sum = np.einsum('ijk,ijl->kl', self.x_mats / self.sigma2_arr[:, None, None], self.x_mats)
@@ -234,7 +241,7 @@ class VariableCoefficientModel():
         p_value = 1 - stats.chi2.cdf(swamy_f_stat, df)   # Swamy's test statistic is chi-square under H0: no heterogeneity, not F despite the name
         return swamy_f_stat, p_value
     
-def vcm_inference(vcm_model, vcm_data, index_by, panel_id, intercept=True):
+def vcm_prediction(vcm_model, vcm_data, index_by, panel_id, intercept=True):
     # model_params = vcm_model.beta_mat[panel_id]
     # model_params = vcm_model.beta_gls
     model_params = vcm_model.blue_beta_list[panel_id-1]
