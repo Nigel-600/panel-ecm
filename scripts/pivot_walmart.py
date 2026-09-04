@@ -1,8 +1,8 @@
 import duckdb
 import polars as pl
-import polars.selectors as cs
 import os
 import logging
+from datetime import datetime
 
 import numpy as np
 import pandas as pd
@@ -82,12 +82,28 @@ def save_pivot(wm45_pl_df: pl.DataFrame, values: str, output_path: str, filename
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Walmart aggregate sales per store")
     parser.add_argument("--output_path", type=str, default=r"data", help="Path to output aggregate weekly sales and other regressors' data in csv. Should be a path relative to current directory of code execution.")
-    parser.add_argument("--scale", type=int, default=0, help="To scale the weekly sales revenue by the million. 0 to avoid scaling. Will normalise otherwise.")
+    
+    parser.add_argument(
+        "--no-log-file",
+        action="store_true",
+        default=False,
+        help="If set, do not write logs to a file — log to stdout/terminal only."
+    )
+    parser.add_argument("--scale", action="store_true", default=False, help="To scale the weekly sales revenue by the million.")
     parser.add_argument("--log-level", type=str, default="INFO", help="Logging level: DEBUG, INFO, WARNING, ERROR, CRITICAL")
-    parser.add_argument("--log-file", type=str, default=None, help="Optional path to write logs to a file, in addition to stdout")
+    parser.add_argument("--logger-dir", type=str, default="logs", help="Optional path to write logs to a file, in addition to stdout")
+    parser.add_argument("--log-transform", action="store_true", default=False, help="To apply a log-transformation to the Weekly_Sales time series.")
+    parser.add_argument("--difference-sales", action="store_true", default=False, help="To apply a first differencing to the Weekly_Sales time series, and save results to a new column.")
     args = parser.parse_args()
 
-    setup_logging(level=args.log_level, log_file=args.log_file)
+    if args.no_log_file:
+        logger_file = None
+    else:
+        os.makedirs(args.logger_dir, exist_ok=True)
+        logger_file = os.path.join(args.logger_dir, f"pivot_walmart_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
+
+
+    setup_logging(level=args.log_level, log_file=logger_file)
     logger.info("Starting Walmart aggregate sales processing")
     logger.debug("Parsed args: %s", args)
 
@@ -161,10 +177,28 @@ if __name__ == "__main__":
     logger.info("Converting final DataFrame to pandas")
     wm45_df = wm45_pl_df.to_pandas()
     if args.scale:
-        logger.info("Scaling Weekly_Sales by 1,000,000")
+        logger.info(f"Scaling Weekly_Sales by 1,000,000 (--scale={args.scale})")
         wm45_df["Weekly_Sales"] = wm45_df["Weekly_Sales"] / 1_000_000
     else:
-        logger.info("Skipping Weekly_Sales scaling (--scale=0)")
+        logger.info(f"Skipping Weekly_Sales scaling (--scale={args.scale})")
+        
+    if args.log_transform:
+        logger.info(f"Applying log transform to Weekly_Sales (--log-transform={args.log_transform})")
+        wm45_df["Weekly_Sales"] = np.log(wm45_df["Weekly_Sales"])
+    else:
+        logger.info(f"Skipping Weekly_Sales log transformation (--log-transform={args.log_transform})")
+        
+    if args.difference_sales:
+        logger.info(f"Differencing weekly sales per panel and saving to Weekly_Sales_diff column (--difference-sales={args.difference_sales})")
+        wm45_df = wm45_df.sort_values(["Store", "DateInt"]).reset_index(drop=True)
+        wm45_df["Weekly_Sales_diff"] = np.nan
+        
+        for store in wm45_df["Store"].unique():
+            store_mask = wm45_df["Store"] == store
+            store_slice = wm45_df.loc[store_mask, "Weekly_Sales"]
+            wm45_df.loc[store_mask, "Weekly_Sales_diff"] = store_slice.diff()
+    else:
+        logger.info(f"Skipping Weekly_Sales differencing (--difference-sales={args.difference_sales})")
 
 
     final_out_path = os.path.join(args.output_path, "wm45_df.csv")
