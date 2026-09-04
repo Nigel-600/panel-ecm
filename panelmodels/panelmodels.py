@@ -3,12 +3,8 @@ import pandas as pd
 import scipy.linalg as la
 import statsmodels.stats.api as sms
 
-import duckdb
-import polars as pl
-import polars.selectors as cs
 from scipy import stats
-import os
-from datetime import datetime
+from sklearn.preprocessing import LabelEncoder
 
 import copy
 
@@ -35,11 +31,29 @@ class VariableCoefficientModel():
             lags: int = 0, 
             model_type: Literal["random", "fixed"] = "random", 
             intercept: bool = True, 
-            asymptotic: bool = True, 
-            bayes_estimator: bool = False
+            asymptotic: bool = True
         ) -> Self:
         """Public entry point — validates/dispatches to _fit and returns self."""
         self.reset_parameters()
+        
+        panel_df = panel_df.copy()
+        self.id_encoder = LabelEncoder()
+        panel_df[self.index_by] = self.id_encoder.fit_transform(panel_df[self.index_by]) + 1
+        original_to_encoded = {
+            orig: enc + 1
+            for orig, enc in zip(self.id_encoder.classes_, self.id_encoder.transform(self.id_encoder.classes_))
+        }
+        
+        remapped_regressors = {}
+        for key, val in regressors.items():
+            if key.startswith("exog_"):
+                orig_id = type(self.id_encoder.classes_[0])(key.split("exog_")[1])
+                remapped_regressors[f"exog_{original_to_encoded[orig_id]}"] = val
+            else:
+                remapped_regressors[key] = val
+        regressors = remapped_regressors
+        
+        
         self.individual_ids = panel_df[self.index_by].unique()
         self.regressors_with_lags = copy.deepcopy(regressors)
         self.response = response
@@ -62,7 +76,7 @@ class VariableCoefficientModel():
             
         )
         if model_type == "random":
-            return self._fit_swamy(asymptotic, bayes_estimator)
+            return self._fit_swamy(asymptotic)
         elif model_type == "fixed":
             return self._fit_sur()
 
@@ -119,33 +133,29 @@ class VariableCoefficientModel():
         self.beta_SUR_mat = self.beta_SUR_flat.reshape(self.N, self.k)
 
         
-        # =========================================================================
-        # EXTENSION: HYPOTHESIS TESTING & INFERENCE STATS
-        # =========================================================================
         
-        # 6. Compute Coefficient Covariance Matrix
+        # Compute Coefficient Covariance Matrix
         # Var(Beta) = inv(X_Om_X)
         self.beta_cov_mat = la.inv(X_Om_X)
         
-        # 7. Extract Standard Errors
+        # Extract Standard Errors
         # Take the square root of the diagonal variances
         self.beta_se_flat = np.sqrt(np.diag(self.beta_cov_mat))   # (N*k,)
         self.beta_se_mat = self.beta_se_flat.reshape(self.N, self.k)
         
-        # 8. Compute t-statistics
+        # Compute t-statistics
         self.t_stats_flat = self.beta_SUR_flat / self.beta_se_flat   # now (N*k,) / (N*k,) = (N*k,) correctly
         self.t_stats_mat = self.t_stats_flat.reshape(self.N, self.k)
-        
-        # 9. Compute p-values using the Student-t distribution
-        # Degrees of freedom per equation = T - k
+
+        return self
+    
+    def sur_stats(self):
         df_residual = self.T - self.k
         self.p_values_flat = 2 * (1 - stats.t.cdf(np.abs(self.t_stats_flat), df=df_residual))
         self.p_values_mat = self.p_values_flat.reshape(self.N, self.k)
         
-        
         lower_tri = np.tril_indices(self.N, k=-1)
-        r_ij = self.residuals_corr_mat[lower_tri]                                    # off-diagonal correlations, no double counting
-
+        r_ij = self.residuals_corr_mat[lower_tri]                                
         # ---------- 1. Breusch-Pagan LM test ----------
         # H0: Sigma is diagonal (no cross-equation correlation)
         lm_statistic = self.T * np.sum(r_ij ** 2)
@@ -156,18 +166,19 @@ class VariableCoefficientModel():
         # Same H0, but robust to large N relative to T
         cd_statistic = np.sqrt(2 * self.T / (self.N * (self.N - 1))) * np.sum(r_ij)
         cd_p_value = 2 * (1 - stats.norm.cdf(np.abs(cd_statistic)))
-        return self, {
-                "lm_stat": float(lm_statistic),
-                "lm_df": lm_df,
-                "lm_p_value": float(lm_p_value),
-                "cd_stat": float(cd_statistic),
-                "cd_p_value": float(cd_p_value),
-            }
+        return {
+            "t_stats": self.t_stats_mat,
+            "p_values": self.p_values_mat,
+            "lm_stat": float(lm_statistic),
+            "lm_df": lm_df,
+            "lm_p_value": float(lm_p_value),
+            "cd_stat": float(cd_statistic),
+            "cd_p_value": float(cd_p_value),
+        }
 
         
         
-        
-    def _fit_swamy(self, asymptotic=True, bayes_estimator=False):
+    def _fit_swamy(self, asymptotic=True):
         """Does the actual work: per-unit OLS, Swamy-Arora random coefficients, FGLS."""
 
         beta_bar = self.beta_mat.mean(axis=0)
@@ -199,6 +210,8 @@ class VariableCoefficientModel():
         for i in self.individual_ids-1:
             blue_beta_i = self.beta_gls + swamy_Delta @ self.x_mats[i].T @ np.linalg.inv(self.x_mats[i] @ swamy_Delta @ self.x_mats[i].T + self.sigma2_arr[i] * np.eye(self.T)) @ (self.y_stack[i] - self.x_mats[i] @ self.beta_gls)
             self.blue_beta_list.append(blue_beta_i)
+            
+        return self
     
         
     def gen_breusch_pagan(self):
@@ -220,6 +233,7 @@ class VariableCoefficientModel():
         bp_resids = sigma_diag_mat @ (ybar_vec - mean_regressors @ self.beta_mat.mean(axis = 0))
         
         lm_stat, p_value, f_stat, f_p_value = sms.het_breuschpagan(bp_resids, mean_regressors)
+        
         return {
             "lm_statistic": lm_stat,
             "p_value": p_value,
@@ -241,19 +255,33 @@ class VariableCoefficientModel():
         p_value = 1 - stats.chi2.cdf(swamy_f_stat, df)   # Swamy's test statistic is chi-square under H0: no heterogeneity, not F despite the name
         return swamy_f_stat, p_value
     
-def vcm_prediction(vcm_model, vcm_data, index_by, panel_id, intercept=True):
-    # model_params = vcm_model.beta_mat[panel_id]
-    # model_params = vcm_model.beta_gls
-    model_params = vcm_model.blue_beta_list[panel_id-1]
-    model_ftrs = vcm_model.regressors_with_lags[f'exog_{panel_id}']
-    panel_data = vcm_data.loc[vcm_data[index_by] == panel_id]
-    
+def swamy_prediction(vcm_model, vcm_data, index_by, panel_id, intercept=True):
+    encoded_id = int(vcm_model.id_encoder.transform([panel_id])[0]) + 1
+
+    model_params = vcm_model.blue_beta_list[encoded_id - 1]
+    model_ftrs = vcm_model.regressors_with_lags[f'exog_{encoded_id}']
+    panel_data = vcm_data.loc[vcm_data[index_by] == panel_id]   # stays as original id
+
     if intercept:
         vcm_data_matrix = panel_data[model_ftrs].to_numpy()
         vcm_data_matrix = np.hstack((np.ones((vcm_model.T, 1)), vcm_data_matrix))
     else:
         vcm_data_matrix = panel_data[model_ftrs].to_numpy()
-        
-        
-    
+
+    return vcm_data_matrix @ model_params
+
+
+def sur_prediction(vcm_model, vcm_data, index_by, panel_id, intercept=True):
+    encoded_id = int(vcm_model.id_encoder.transform([panel_id])[0]) + 1
+
+    model_params = vcm_model.beta_SUR_mat[encoded_id - 1]
+    model_ftrs = vcm_model.regressors_with_lags[f'exog_{encoded_id}']
+    panel_data = vcm_data.loc[vcm_data[index_by] == panel_id]   # stays as original id
+
+    if intercept:
+        vcm_data_matrix = panel_data[model_ftrs].to_numpy()
+        vcm_data_matrix = np.hstack((np.ones((vcm_model.T, 1)), vcm_data_matrix))
+    else:
+        vcm_data_matrix = panel_data[model_ftrs].to_numpy()
+
     return vcm_data_matrix @ model_params
